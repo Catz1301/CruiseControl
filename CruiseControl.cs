@@ -14,31 +14,33 @@ namespace CruiseControl {
 		float cruiseSpeed = 0.0f;
 		Vector3 velocity;
 		Vector3 direction;
-		SettingsFile settings;
-		
-		
+		readonly SettingsFile settings;
+
+
 #if DEBUG
 		GTA.Font screenFont, pixelFont;
 		Color screenBoxColor = Color.FromArgb(127, 0, 0, 255);
 		Color pixelBoxColor = Color.FromArgb(127, 0, 255, 0);
 #endif
-		CrazyWorld crazyWorld;
+		private CrazyWorld crazyWorld;
 		private RectangleF cruiseIndicator;
-		float magnitude = 0.0f;
+		readonly GTA.Font speedFont = new GTA.Font(20, FontScaling.Pixel);
 
+		float magnitude = 0.0f;
 		// Bad things detection
 		int vehicleTimeOffWheel = 0;
 		int vehicleTimeCrashing = 0;
 		//int vehicleTimeSkidding = 0;
-		int max_vehicleTimeOffWheel = 50;
-		int max_vehicleTimeCrashing = 75;
+		readonly int max_vehicleTimeOffWheel;
+		readonly int max_vehicleTimeCrashing;
 
-		GTA.Font font = new GTA.Font(20, FontScaling.Pixel);
+		readonly bool showSpeed = true;
+
 		public CruiseControl() {
 			settings = Settings;
-			BindKey(Keys.C, true, true, false, new KeyPressDelegate(toggleCruiseControl));
-			BindConsoleCommand("reloadCruiseControlConf", new ConsoleCommandDelegate(reloadSettings));
-			BindConsoleCommand("reloadCCConf", new ConsoleCommandDelegate(reloadSettings));
+			BindKey(Keys.C, true, true, false, new KeyPressDelegate(ToggleCruiseControl));
+			BindConsoleCommand("reloadCruiseControlConf", new ConsoleCommandDelegate(ReloadSettings));
+			BindConsoleCommand("reloadCCConf", new ConsoleCommandDelegate(ReloadSettings));
 			this.Tick += new System.EventHandler(HandleCruise);
 #if DEBUG
 			screenFont = new GTA.Font(0.02F, FontScaling.ScreenUnits);
@@ -51,11 +53,14 @@ namespace CruiseControl {
 			velocity = new Vector3();
 			this.PerFrameDrawing += new GraphicsEventHandler(this.DrawingExample_PerFrameDrawing);
 			bool doCrazyWorld = false;
+			max_vehicleTimeOffWheel = 50;
+			max_vehicleTimeCrashing = 75;
 			if (!Exists(settings)) {
 				if (!File.Exists("CruiseControl.ini")) {
 					StreamWriter settingsFile = File.CreateText("CruiseControl.ini");
 					settingsFile.WriteLine("[Extras]");
 					settingsFile.WriteLine("crazyWorld=false");
+					settingsFile.WriteLine("showSpeed=true");
 					settingsFile.WriteLine("[SafteyDetection]");
 					settingsFile.WriteLine("maxVehicleTimeOffWheel=50");
 					settingsFile.WriteLine("maxVehicleTimeCrashing=75");
@@ -66,6 +71,7 @@ namespace CruiseControl {
 				doCrazyWorld = settings.GetValueBool("crazyWorld", "Extras", false);
 				max_vehicleTimeOffWheel = settings.GetValueInteger("maxVehicleTimeOffWheel", "SafetyDetection", 50);
 				max_vehicleTimeCrashing = settings.GetValueInteger("maxVehicleTimeCrashing", "SafetyDetection", 75);
+				showSpeed = settings.GetValueBool("showSpeed", "Extras", true);
 			}
 			crazyWorld = new CrazyWorld(doCrazyWorld);
 			string txt;
@@ -75,7 +81,7 @@ namespace CruiseControl {
 				txt = "CrazyWorld is Off";
 			Game.DisplayText(txt);
 			cruiseIndicator = new RectangleF(8, 8, 16, 16);
-			
+
 		}
 
 		private void DrawingExample_PerFrameDrawing(object sender, GraphicsEventArgs e) {
@@ -98,9 +104,14 @@ namespace CruiseControl {
 			e.Graphics.Scaling = FontScaling.Pixel;
 			if (cruiseOn)
 				e.Graphics.DrawRectangle(cruiseIndicator, Color.Yellow);
+			if (showSpeed) {
+				e.Graphics.Scaling = FontScaling.ScreenUnits;
+				e.Graphics.DrawText(Math.Truncate(cruiseSpeed) + "", 0.85F, 0.85F, Color.White, speedFont);
+			}
+
 		}
 
-		public void toggleCruiseControl() {
+		public void ToggleCruiseControl() {
 			cruiseOn = !cruiseOn;
 			if (cruiseOn) {
 				cruiseSpeed = Player.Character.CurrentVehicle.Speed;
@@ -108,11 +119,11 @@ namespace CruiseControl {
 				vehicleTimeCrashing = 0;
 				vehicleTimeOffWheel = 0;
 				//vehicleTimeSkidding = 0;
-				CrazyWorld_State(crazyWorld, CrazyWorld.State.CREATE);
+				CrazyWorldStuff.CrazyWorld_State(crazyWorld, CrazyWorld.State.CREATE, Player);
 			} else {
 				cruiseSpeed = 0.0f;
 				magnitude = 0.0f;
-				CrazyWorld_State(crazyWorld, CrazyWorld.State.DESTROY);
+				CrazyWorldStuff.CrazyWorld_State(crazyWorld, CrazyWorld.State.DESTROY, Player);
 			}
 		}
 
@@ -121,6 +132,9 @@ namespace CruiseControl {
 				return;
 			} else {
 				if (Player.Character.isInVehicle() && Player.Character.CurrentVehicle.GetPedOnSeat(VehicleSeat.Driver) == Player.Character) {
+					if (isKeyPressed(Keys.Space))
+						cruiseOn = false;
+
 					float orginalZ = velocity.Z;
 					direction = Player.Character.CurrentVehicle.Velocity;
 					velocity = Vector3.Normalize(direction) * magnitude;
@@ -159,7 +173,7 @@ namespace CruiseControl {
 						cruiseOn = false;*/
 
 					if (crazyWorld.enabled)
-						doCrazyWorld(crazyWorld);
+						CrazyWorldStuff.DoCrazyWorld(crazyWorld, velocity, Player);
 				} else {
 					cruiseOn = false;
 					cruiseSpeed = 0.0f;
@@ -167,65 +181,15 @@ namespace CruiseControl {
 			}
 		}
 
-		public void reloadSettings(ParameterCollection param) {
+		public void ReloadSettings(ParameterCollection param) {
 			settings.Load();
 			Game.Console.Print("Reloaded CruiseControl settings!");
 		}
 
-		public bool isCarInWater(Vehicle vehicle) {
+		public bool IsCarInWater(Vehicle vehicle) {
 			return GTA.Native.Function.Call<bool>("IS_CAR_IN_WATER", vehicle);
 		}
 
-		private void doCrazyWorld(CrazyWorld crazyWorld) {
-			if (!crazyWorld.enabled)
-				return;
-
-			if (crazyWorld.vehicles != null && crazyWorld.peds != null && crazyWorld.objects != null) {
-				foreach (Vehicle vehicle in crazyWorld.vehicles) {
-					if (Exists(vehicle)) {
-						vehicle.Velocity = Vector3.Clamp((vehicle.Velocity + Vector3.Normalize(velocity)), Vector3.Zero, velocity);
-						vehicle.GetPedOnSeat(VehicleSeat.Driver);
-					}
-				}
-				foreach (Ped pedestrian in crazyWorld.peds) {
-					if (Exists(pedestrian)) {
-						if (pedestrian != Player.Character)
-							pedestrian.Velocity += Vector3.Lerp(pedestrian.Velocity, velocity, 1f);
-					}
-				}
-
-				foreach (GTA.Object gObject in crazyWorld.objects) {
-					if (Exists(gObject)) {
-						Vehicle tmpVehicle = World.GetClosestVehicle(gObject.Position, 20F);
-						if (Exists(tmpVehicle))
-							gObject.Velocity += Vector3.Cross(velocity, tmpVehicle.Velocity);
-						else
-							gObject.Velocity += Vector3.Cross(velocity, Vector3.RandomXYZ());
-					}
-				}
-			}
-		}
-
-		private void CrazyWorld_State(CrazyWorld crazyWorld, CrazyWorld.State state) {
-			if (!crazyWorld.enabled)
-				return;
-			
-			if (state == CrazyWorld.State.CREATE) {
-				crazyWorld.vehicles = World.GetAllVehicles();
-				foreach (Vehicle vehicle in crazyWorld.vehicles) {
-					if (Exists(vehicle)) {
-						if (vehicle != Player.Character.CurrentVehicle) {
-							vehicle.EveryoneLeaveVehicle();
-						}
-					}
-				}
-				crazyWorld.peds = World.GetAllPeds();
-				crazyWorld.objects = World.GetAllObjects();
-			} else if (state == CrazyWorld.State.DESTROY) {
-				crazyWorld.vehicles = null;
-				crazyWorld.peds = null;
-				crazyWorld.objects = null;
-			}
-		}
+		
 	}
 }
